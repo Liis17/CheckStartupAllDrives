@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "CheckStartupAllDrives.CLI": {
+      "commandName": "Project",
+      "commandLineArgs": "-h"
+    }
+  }
+}
