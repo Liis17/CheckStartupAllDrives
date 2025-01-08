@@ -1,12 +1,23 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using Microsoft.Win32;
+using System.Security.Principal;
+using System.Threading;
 
 class Program
 {
     static void Main(string[] args)
     {
-        int version = 1;
+        // Проверка прав администратора
+        if (!IsAdministrator())
+        {
+            RestartAsAdministrator();
+            return;
+        }
 
+        int version = 2;
         string fileName = "disk.file";
         Console.Title = "CheckStartupAllDrives";
 
@@ -30,6 +41,7 @@ class Program
             {
                 Console.WriteLine("Файл disk.file не найден.");
             }
+            return;
         }
         else if (args.Length > 0 && (args[0] == "-v" || args[0] == "--version"))
         {
@@ -37,121 +49,129 @@ class Program
             Console.Read();
             return;
         }
-        else if (args.Length > 0 && (args[0] == "-h" || args[0] == "--help"))
-        {
-            Console.WriteLine($"-h | --help - этот текст\n-r | --reset - сбросить файл с сохраненными дисками\n-v | --version - версия программы\n\nПрограмма проверяет доступные диски на компьютере. Она читает буквы дисков из файла disk.file. Если файл отсутствует или пуст, программа запрашивает у пользователя ввод и сохраняет его. Затем программа выводит информацию о каждом диске (общий объем, занятое и свободное место), создает на дисках тестовый файл testdisk.file размером 100 МБ и удаляет его после проверки, сообщая о результатах каждой операции.");
-            Console.Read();
-            return;
-        }
-        else if(args.Length == 0)
-        {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.WriteLine("Программа запущена без аргументов");
-            Console.ResetColor();
-        }
+
+        // Добавление в автозагрузку
+        AddToStartup();
+
         string[] diskLetters;
+        var drives = DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed).ToArray();
 
         if (File.Exists(fileName))
         {
-            diskLetters = File.ReadAllLines(fileName);
-            diskLetters = Array.FindAll(diskLetters, letter => !string.IsNullOrWhiteSpace(letter));
+            diskLetters = File.ReadAllLines(fileName).Select(d => d.ToLower()).ToArray();
         }
         else
         {
-            diskLetters = new string[0];
-        }
-
-        if (diskLetters.Length == 0)
-        {
-            Console.WriteLine("Введите буквы дисков (в нижнем регистре, через пробел):");
-            bool validInput = false;
-
-            while (!validInput)
-            {
-                string input = Console.ReadLine();
-                diskLetters = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-                validInput = true;
-                foreach (var letter in diskLetters)
-                {
-                    if (letter.Length != 1 || !char.IsLetter(letter[0]) || !char.IsLower(letter[0]))
-                    {
-                        validInput = false;
-                        Console.WriteLine("Некорректный ввод. Попробуйте еще раз:");
-                        break;
-                    }
-                }
-            }
-
+            diskLetters = drives.Select(d => d.Name.Substring(0, 1).ToLower()).ToArray();
             File.WriteAllLines(fileName, diskLetters);
         }
 
-        foreach (var letter in diskLetters)
-        {
-            string driveLetter = letter.ToUpper() + ":\\";
-            DriveInfo drive = null;
+        var currentDrives = drives.Select(d => d.Name.Substring(0, 1).ToLower()).ToArray();
+        bool allDisksPassed = true;
 
-            try
-            {
-                drive = new DriveInfo(driveLetter);
-                if (!drive.IsReady)
-                    throw new Exception("Диск не готов.");
-            }
-            catch (Exception)
+        foreach (var disk in diskLetters)
+        {
+            string driveLetter = disk.ToUpper() + ":\\";
+            var drive = drives.FirstOrDefault(d => d.Name.StartsWith(disk, StringComparison.OrdinalIgnoreCase));
+
+            if (drive == null)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine();
-                Console.WriteLine($"Диск {driveLetter} не найден или недоступен.");
-                Console.ResetColor();
+                Console.WriteLine($"Диск {disk.ToUpper()} -- гб |-------------------| -- гб - не найден");
+                allDisksPassed = false;
                 continue;
             }
 
-            Console.WriteLine();
-            Console.ForegroundColor = ConsoleColor.Blue;
-            Console.WriteLine($"Диск {driveLetter}:");
-            Console.ResetColor();
-            Console.WriteLine($"Всего места: {drive.TotalSize / (1024 * 1024)} МБ");
-            Console.WriteLine($"Занято: {(drive.TotalSize - drive.AvailableFreeSpace) / (1024 * 1024)} МБ");
-            Console.WriteLine($"Свободно: {drive.AvailableFreeSpace / (1024 * 1024)} МБ");
+            string testFilePath = Path.Combine(drive.Name, "testdisk.file");
+            bool writeSuccess = true;
 
-            string testFilePath = Path.Combine(driveLetter, "testdisk.file");
             try
             {
                 using (FileStream fs = new FileStream(testFilePath, FileMode.Create, FileAccess.Write))
                 {
                     fs.SetLength(100 * 1024 * 1024); // 100мб
                 }
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Файл testdisk.file успешно создан на диске {driveLetter}.");
-                Console.ResetColor();
+                File.Delete(testFilePath);
             }
-            catch (Exception)
+            catch
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Не удалось создать файл на диске {driveLetter}.");
-                Console.ResetColor();
-                continue;
+                writeSuccess = false;
             }
 
-            try
+            string bar = new string('█', (int)(drive.TotalSize > 0 ? 10 * (1 - (double)drive.AvailableFreeSpace / drive.TotalSize) : 0))
+                .PadRight(10, ' ');
+
+            Console.ForegroundColor = writeSuccess ? ConsoleColor.Green : ConsoleColor.DarkYellow;
+            Console.WriteLine(
+                $"Диск {drive.Name.Substring(0, 1)} {(drive.TotalSize - drive.AvailableFreeSpace) / (1024 * 1024 * 1024)} гб {bar} | {drive.TotalSize / (1024 * 1024 * 1024)} гб - {(writeSuccess ? "рабочий" : "не прошел проверку")}");
+
+            if (!writeSuccess)
             {
-                File.Delete(testFilePath);
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Файл testdisk.file успешно удален с диска {driveLetter}.");
-                Console.ResetColor();
-            }
-            catch (Exception)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Не удалось удалить файл с диска {driveLetter}.");
-                Console.ResetColor();
+                allDisksPassed = false;
             }
         }
 
-        Console.WriteLine();
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("Проверка завершена, нажмите ENTER для выхода");
-        Console.ResetColor();
-        Console.ReadKey();
+        foreach (var newDisk in currentDrives.Except(diskLetters))
+        {
+            Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine($"Диск {newDisk.ToUpper()} найден, но не указан в disk.file");
+        }
+
+        if (!allDisksPassed)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("Обнаружены ошибки на дисках. Перезагрузка через 5 секунд...");
+            Thread.Sleep(5000);
+            RestartComputer();
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Все диски успешно проверены. Нажмите ENTER для выхода.");
+            Console.ResetColor();
+            Console.ReadLine();
+        }
+    }
+
+    static void AddToStartup()
+    {
+        string exePath = Process.GetCurrentProcess().MainModule.FileName;
+        RegistryKey key = Registry.LocalMachine.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", true);
+        if (key != null)
+        {
+            key.SetValue("CheckStartupAllDrives", exePath);
+            key.Close();
+        }
+    }
+
+    static void RestartComputer()
+    {
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "shutdown",
+            Arguments = "/r /t 0",
+            CreateNoWindow = true,
+            UseShellExecute = false
+        });
+    }
+
+    static bool IsAdministrator()
+    {
+        using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+        {
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+    }
+
+    static void RestartAsAdministrator()
+    {
+        var exePath = Process.GetCurrentProcess().MainModule.FileName;
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = exePath,
+            UseShellExecute = true,
+            Verb = "runas"
+        });
     }
 }
